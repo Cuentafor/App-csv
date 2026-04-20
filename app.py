@@ -1,93 +1,82 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 
-# Configuración de la página para móvil y escritorio
-st.set_page_config(
-    page_title="Extractor Bolsa 10 Años", 
-    layout="wide", 
-    initial_sidebar_state="collapsed"
+st.set_page_config(page_title="Descargar Históricos - Yahoo Finance", layout="centered")
+st.title("📈 Descargar Datos Históricos de Acciones e Índices")
+st.markdown("Usa **yfinance** para obtener precios históricos y descargarlos en CSV.")
+
+# --- Sidebar para configuración ---
+st.sidebar.header("⚙️ Parámetros de descarga")
+
+# Entrada de tickers
+ticker_input = st.sidebar.text_input(
+    "Símbolo (Ticker)",
+    value="AAPL",
+    help="Ejemplos: AAPL, MSFT, ^GSPC, SAN.MC, BBVA.MC"
 )
 
-# Estilo personalizado para botones grandes en el móvil
-st.markdown("""
-    <style>
-    .stDownloadButton button {
-        width: 100%;
-        height: 3em;
-        background-color: #007bff;
-        color: white !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# Selección de fechas
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    start_date = st.date_input(
+        "Fecha inicio",
+        value=datetime.now() - timedelta(days=365),
+        max_value=datetime.now()
+    )
+with col2:
+    end_date = st.date_input(
+        "Fecha fin",
+        value=datetime.now(),
+        max_value=datetime.now()
+    )
 
-st.title("📊 Extractor Histórico Pro")
-st.write("Configurado para obtener datos de los últimos 10 años.")
-
-# --- BARRA LATERAL (Configuración) ---
-st.sidebar.header("Rango de Fechas")
-# Calculamos 10 años atrás (3650 días aprox)
-default_start = date.today() - timedelta(days=3650)
-start_date = st.sidebar.date_input("Desde:", value=default_start)
-end_date = st.sidebar.date_input("Hasta:", value=date.today())
-
-# --- ENTRADA DE TICKERS ---
-tickers_input = st.text_input(
-    "Introduce Tickers (separados por coma):", 
-    value="SAN.MC, TEF.MC",
-    help="Ejemplo: SAN.MC para Santander, ITX.MC para Inditex, AAPL para Apple"
+# Intervalo
+interval = st.sidebar.selectbox(
+    "Intervalo",
+    options=["1d", "1wk", "1mo"],
+    index=0,
+    format_func=lambda x: {"1d": "Diario", "1wk": "Semanal", "1mo": "Mensual"}[x]
 )
 
-if tickers_input:
-    list_tickers = [t.strip().upper() for t in tickers_input.split(",")]
-    
-    try:
-        with st.spinner('Accediendo a Yahoo Finance...'):
-            # Descargamos los datos
-            data = yf.download(list_tickers, start=start_date, end=end_date, group_by='ticker')
+# Botón de descarga
+if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
+    if start_date >= end_date:
+        st.error("La fecha de inicio debe ser anterior a la fecha de fin.")
+    else:
+        with st.spinner(f"Descargando datos para {ticker_input}..."):
+            try:
+                df = yf.download(ticker_input, start=start_date, end=end_date, interval=interval)
+                if df.empty:
+                    st.warning("No se encontraron datos para el ticker especificado.")
+                else:
+                    st.success(f"✅ Datos obtenidos: {len(df)} registros")
+                    
+                    # Mostrar tabla
+                    st.subheader("📋 Vista previa de los datos")
+                    st.dataframe(df.tail(10), use_container_width=True)
+                    
+                    # Preparar CSV para descarga
+                    csv = df.to_csv()
+                    st.download_button(
+                        label="⬇️ Descargar CSV completo",
+                        data=csv,
+                        file_name=f"{ticker_input.replace('^', '')}_{start_date}_{end_date}.csv",
+                        mime="text/csv"
+                    )
+                    
+                    # Gráfico de cierre ajustado
+                    st.subheader("📊 Precio de cierre ajustado")
+                    st.line_chart(df['Adj Close'] if 'Adj Close' in df.columns else df['Close'])
+                    
+            except Exception as e:
+                st.error(f"Error al obtener datos: {str(e)}")
 
-        if not data.empty:
-            st.success(f"¡Éxito! Datos obtenidos.")
-            
-            # Gráfico interactivo para ver la tendencia de 10 años
-            if len(list_tickers) > 1:
-                st.subheader("Evolución Comparativa (Cierre)")
-                # Extraemos solo la columna 'Close' para el gráfico
-                closes = data.xs('Close', level=1, axis=1) if len(list_tickers) > 1 else data['Close']
-                st.line_chart(closes)
-            
-            st.divider()
-            st.subheader("📥 Descargar Archivos CSV")
-            
-            # Generar botones de descarga
-            if len(list_tickers) == 1:
-                ticker = list_tickers[0]
-                csv = data.to_csv().encode('utf-8')
-                st.download_button(
-                    label=f"DESCARGAR CSV: {ticker}",
-                    data=csv,
-                    file_name=f"{ticker}_{start_date}_{end_date}.csv",
-                    mime='text/csv',
-                )
-            else:
-                # Crear columnas para los botones en el móvil
-                for ticker in list_tickers:
-                    if ticker in data.columns.levels[0]:
-                        df_ticker = data[ticker].dropna()
-                        csv_multi = df_ticker.to_csv().encode('utf-8')
-                        st.download_button(
-                            label=f"Descargar {ticker} ({len(df_ticker)} filas)",
-                            data=csv_multi,
-                            file_name=f"{ticker}_{start_date}_{end_date}.csv",
-                            mime='text/csv',
-                            key=ticker # Clave única para Streamlit
-                        )
-
-        else:
-            st.error("No se encontraron datos. Verifica los tickers y el rango de fechas.")
-
-    except Exception as e:
-        st.error(f"Error técnico: {e}")
-
-st.caption("Nota: Los tickers de la Bolsa de Madrid terminan en .MC")
+# --- Información adicional ---
+st.sidebar.markdown("---")
+st.sidebar.markdown("""
+**📌 Ejemplos de tickers válidos**  
+- Acciones: `AAPL`, `MSFT`, `GOOGL`, `SAN.MC`, `BBVA.MC`  
+- Índices: `^GSPC` (S&P 500), `^IXIC` (Nasdaq), `^IBEX` (IBEX 35)
+""")
