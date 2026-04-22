@@ -3,8 +3,9 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 import io
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import zipfile
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="Descargar Históricos - Yahoo Finance", layout="centered")
 st.title("📈 Descargar Datos Históricos de Acciones e Índices")
@@ -54,7 +55,6 @@ def descargar_ticker(ticker, start, end, interval):
         if data.empty:
             return None
         data = data.reset_index()
-        # Asegurar nombre de columna de fecha
         if 'Date' not in data.columns:
             data.rename(columns={data.columns[0]: 'Date'}, inplace=True)
         return data
@@ -92,33 +92,48 @@ if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
     df_preview = resultados[primer_ticker][['Date'] + selected_columns]
     st.dataframe(df_preview.tail(5), use_container_width=True)
 
-    # --- Descarga individual por cada ticker ---
-    st.subheader("⬇️ Descarga individual por ticker")
-    for ticker, df in resultados.items():
-        # Filtrar columnas seleccionadas
+    # --- Función para generar el contenido de un ticker (bytes) ---
+    def generar_archivo_bytes(df, ticker, formato):
         cols = ['Date'] + [col for col in selected_columns if col in df.columns]
         df_export = df[cols].copy()
         df_export = df_export.fillna('')
-        
-        # Generar archivo en memoria según formato
-        if output_format == "CSV":
-            data = df_export.to_csv(index=False).encode('utf-8')
-            mime = "text/csv"
-            ext = "csv"
+        if formato == "CSV":
+            return df_export.to_csv(index=False).encode('utf-8')
         else:
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 df_export.to_excel(writer, index=False, sheet_name=ticker[:31])
-            data = output.getvalue()
-            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            ext = "xlsx"
-        
+            return output.getvalue()
+
+    # --- Botones de descarga individual ---
+    st.subheader("⬇️ Descarga individual por ticker")
+    for ticker, df in resultados.items():
+        archivo_bytes = generar_archivo_bytes(df, ticker, output_format)
+        ext = "csv" if output_format == "CSV" else "xlsx"
         st.download_button(
             label=f"📥 {ticker} - {output_format}",
-            data=data,
+            data=archivo_bytes,
             file_name=f"{ticker.replace('^', '')}_{start_date}_{end_date}.{ext}",
-            mime=mime,
+            mime="text/csv" if output_format == "CSV" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key=f"download_{ticker}"
+        )
+
+    # --- Botón de descarga de todos en ZIP ---
+    if len(resultados) > 1:
+        st.subheader("📦 Descarga masiva")
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for ticker, df in resultados.items():
+                archivo_bytes = generar_archivo_bytes(df, ticker, output_format)
+                ext = "csv" if output_format == "CSV" else "xlsx"
+                nombre_archivo = f"{ticker.replace('^', '')}_{start_date}_{end_date}.{ext}"
+                zip_file.writestr(nombre_archivo, archivo_bytes)
+        zip_buffer.seek(0)
+        st.download_button(
+            label="📦 Descargar TODOS en ZIP",
+            data=zip_buffer,
+            file_name=f"tickers_{start_date}_{end_date}.zip",
+            mime="application/zip"
         )
 
     # --- Gráfico del primer ticker ---
