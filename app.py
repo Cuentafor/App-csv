@@ -30,14 +30,28 @@ with col1:
 with col2:
     end_date = st.date_input("Fecha fin", value=datetime.now(), max_value=datetime.now())
 
-interval = st.sidebar.selectbox("Intervalo", ["1d", "1wk", "1mo"], format_func=lambda x: {"1d": "Diario", "1wk": "Semanal", "1mo": "Mensual"}[x])
+# --- Selección de intervalo (incluye intradiarios) ---
+interval = st.sidebar.selectbox(
+    "Intervalo",
+    options=["1m", "2m", "5m", "15m", "30m", "60m", "1h", "1d", "5d", "1wk", "1mo"],
+    index=7,  # 1d por defecto
+    format_func=lambda x: {
+        "1m": "1 minuto", "2m": "2 minutos", "5m": "5 minutos", "15m": "15 minutos",
+        "30m": "30 minutos", "60m": "60 minutos", "1h": "1 hora", "1d": "Diario",
+        "5d": "5 días", "1wk": "Semanal", "1mo": "Mensual"
+    }[x]
+)
+
+# --- Nuevo: Checkbox para incluir datos de pre-apertura y post-cierre ---
+include_prepost = st.sidebar.checkbox("Incluir datos de pre-apertura y post-cierre", value=False, 
+                                      help="Solo aplicable para intervalos intradiarios")
 
 available_columns = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
 selected_columns = st.sidebar.multiselect("Columnas a exportar", options=available_columns, default=available_columns)
 
 output_format = st.sidebar.radio("Formato de descarga", ["CSV", "Excel"], index=0, horizontal=True)
 
-# --- Validaciones ---
+# --- Validaciones y ajustes de fechas ---
 if start_date >= end_date:
     st.sidebar.error("❌ La fecha de inicio debe ser anterior a la fecha de fin.")
     st.stop()
@@ -47,11 +61,51 @@ if not tickers:
     st.sidebar.error("❌ Introduce al menos un ticker válido.")
     st.stop()
 
+# Ajustes para datos intradiarios
+intraday_intervals = ["1m", "2m", "5m", "15m", "30m", "60m", "1h"]
+is_intraday = interval in intraday_intervals
+
+if is_intraday:
+    # Calcular la fecha límite basada en el intervalo
+    today = datetime.now().date()
+    if interval == "1m":
+        max_days_back = 7
+        max_total_days = 30
+        warning_msg = "Los datos de 1 minuto solo están disponibles para los últimos 7 días dentro de un rango máximo de 30 días."
+    elif interval in ["2m", "5m", "15m", "30m"]:
+        max_days_back = 60
+        max_total_days = 60
+        warning_msg = f"Los datos de {interval} solo están disponibles para los últimos 60 días."
+    else:  # 60m, 1h
+        max_days_back = 730
+        max_total_days = 730
+        warning_msg = f"Los datos de {interval} tienen un límite de hasta 730 días."
+    
+    # Ajustar fecha de inicio si es necesario
+    earliest_allowed_start = today - timedelta(days=max_days_back)
+    if start_date < earliest_allowed_start:
+        st.warning(f"⚠️ Para el intervalo '{interval}', la fecha de inicio se ha ajustado automáticamente de {start_date} a {earliest_allowed_start}.")
+        start_date = earliest_allowed_start
+    
+    # Mostrar advertencia si el rango de fechas es muy amplio
+    days_diff = (end_date - start_date).days
+    if days_diff > max_total_days:
+        st.warning(f"⚠️ El rango de fechas seleccionado ({days_diff} días) es superior al límite de {max_total_days} días para el intervalo '{interval}'. Es posible que no se descarguen todos los datos.")
+
 # --- Función de descarga robusta ---
 @st.cache_data(ttl=3600, show_spinner=False)
-def descargar_ticker(ticker, start, end, interval):
+def descargar_ticker(ticker, start, end, interval, prepost):
     try:
-        data = yf.download(ticker, start=start, end=end, interval=interval, progress=False, auto_adjust=False, threads=True)
+        data = yf.download(
+            ticker, 
+            start=start, 
+            end=end, 
+            interval=interval, 
+            progress=False, 
+            auto_adjust=False, 
+            threads=True,
+            prepost=prepost  # Nuevo parámetro
+        )
         if data.empty:
             return None
         data = data.reset_index()
@@ -71,7 +125,7 @@ if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
     resultados = {}
     with st.spinner(f"Descargando {len(tickers)} ticker(s)..."):
         with ThreadPoolExecutor(max_workers=min(5, len(tickers))) as executor:
-            futures = {executor.submit(descargar_ticker, t, start_date, end_date, interval): t for t in tickers}
+            futures = {executor.submit(descargar_ticker, t, start_date, end_date, interval, include_prepost): t for t in tickers}
             for future in as_completed(futures):
                 ticker = futures[future]
                 df = future.result()
