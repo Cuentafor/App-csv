@@ -59,43 +59,69 @@ if not tickers:
     st.sidebar.error("❌ Introduce al menos un ticker válido.")
     st.stop()
 
-# Ajustes para datos intradiarios
+# --- Validación estricta para intradiario ---
 intraday_intervals = ["1m", "2m", "5m", "15m", "30m", "60m", "1h"]
 is_intraday = interval in intraday_intervals
 
 if is_intraday:
     today = datetime.now().date()
-    if interval == "1m":
-        max_days_back = 7
-        max_total_days = 30
-        warning_msg = "Los datos de 1 minuto solo están disponibles para los últimos 7 días dentro de un rango máximo de 30 días."
-    elif interval in ["2m", "5m", "15m", "30m"]:
-        max_days_back = 60
-        max_total_days = 60
-        warning_msg = f"Los datos de {interval} solo están disponibles para los últimos 60 días."
-    else:  # 60m, 1h
-        max_days_back = 730
-        max_total_days = 730
-        warning_msg = f"Los datos de {interval} tienen un límite de hasta 730 días."
+    # Límites según Yahoo Finance
+    limits = {
+        "1m": (7, 30),      # (días hacia atrás, rango máximo total en días)
+        "2m": (60, 60),
+        "5m": (60, 60),
+        "15m": (60, 60),
+        "30m": (60, 60),
+        "60m": (730, 730),
+        "1h": (730, 730)
+    }
+    max_days_back, max_total_days = limits[interval]
+    earliest_allowed = today - timedelta(days=max_days_back)
     
-    earliest_allowed_start = today - timedelta(days=max_days_back)
-    if start_date < earliest_allowed_start:
-        st.warning(f"⚠️ Para el intervalo '{interval}', la fecha de inicio se ha ajustado automáticamente de {start_date} a {earliest_allowed_start}.")
-        start_date = earliest_allowed_start
+    # Ajustar fecha de inicio si es necesario
+    if start_date < earliest_allowed:
+        st.error(f"❌ Para intervalo '{interval}', la fecha de inicio no puede ser anterior a {earliest_allowed}. Por favor, selecciona una fecha dentro de los últimos {max_days_back} días.")
+        st.stop()
     
     days_diff = (end_date - start_date).days
     if days_diff > max_total_days:
-        st.warning(f"⚠️ El rango de fechas seleccionado ({days_diff} días) es superior al límite de {max_total_days} días para el intervalo '{interval}'. Es posible que no se descarguen todos los datos.")
+        st.error(f"❌ El rango de fechas seleccionado ({days_diff} días) supera el límite de {max_total_days} días para el intervalo '{interval}'. Reduce el rango.")
+        st.stop()
+    
+    st.info(f"✅ Intervalo intradiario válido: {interval}. Los datos se descargarán correctamente.")
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def descargar_ticker(ticker, start, end, interval, prepost):
     try:
-        data = yf.download(ticker, start=start, end=end, interval=interval, progress=False, auto_adjust=False, threads=True, prepost=prepost)
+        data = yf.download(
+            ticker, 
+            start=start, 
+            end=end, 
+            interval=interval, 
+            progress=False, 
+            auto_adjust=False, 
+            threads=True,
+            prepost=prepost
+        )
         if data.empty:
             return None
+        
+        # --- CORRECCIÓN PRINCIPAL: aplanar columnas si hay MultiIndex ---
+        if isinstance(data.columns, pd.MultiIndex):
+            # Para un solo ticker, las columnas son (ticker, variable) -> nos quedamos con variable
+            data.columns = data.columns.droplevel(0)
+        
+        # Resetear índice para que la fecha sea columna
         data = data.reset_index()
+        
+        # Asegurar que la columna de fecha se llame 'Date'
         if 'Date' not in data.columns:
-            data.rename(columns={data.columns[0]: 'Date'}, inplace=True)
+            # Puede llamarse 'Datetime' o ser la primera columna sin nombre
+            if 'Datetime' in data.columns:
+                data.rename(columns={'Datetime': 'Date'}, inplace=True)
+            else:
+                data.rename(columns={data.columns[0]: 'Date'}, inplace=True)
+        
         return data
     except Exception as e:
         st.error(f"Error con {ticker}: {str(e)}")
