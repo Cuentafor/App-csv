@@ -30,19 +30,7 @@ with col1:
 with col2:
     end_date = st.date_input("Fecha fin", value=datetime.now(), max_value=datetime.now())
 
-# --- Selección de intervalo (incluye intradiarios) ---
-interval = st.sidebar.selectbox(
-    "Intervalo",
-    options=["1m", "2m", "5m", "15m", "30m", "60m", "1h", "1d", "5d", "1wk", "1mo"],
-    index=7,
-    format_func=lambda x: {
-        "1m": "1 minuto", "2m": "2 minutos", "5m": "5 minutos", "15m": "15 minutos",
-        "30m": "30 minutos", "60m": "60 minutos", "1h": "1 hora", "1d": "Diario",
-        "5d": "5 días", "1wk": "Semanal", "1mo": "Mensual"
-    }[x]
-)
-
-include_prepost = st.sidebar.checkbox("Incluir datos de pre-apertura y post-cierre", value=False)
+interval = st.sidebar.selectbox("Intervalo", ["1d", "1wk", "1mo"], format_func=lambda x: {"1d": "Diario", "1wk": "Semanal", "1mo": "Mensual"}[x])
 
 available_columns = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
 selected_columns = st.sidebar.multiselect("Columnas a exportar", options=available_columns, default=available_columns)
@@ -59,74 +47,22 @@ if not tickers:
     st.sidebar.error("❌ Introduce al menos un ticker válido.")
     st.stop()
 
-# --- Validación estricta para intradiario ---
-intraday_intervals = ["1m", "2m", "5m", "15m", "30m", "60m", "1h"]
-is_intraday = interval in intraday_intervals
-
-if is_intraday:
-    today = datetime.now().date()
-    # Límites según Yahoo Finance
-    limits = {
-        "1m": (7, 30),      # (días hacia atrás, rango máximo total en días)
-        "2m": (60, 60),
-        "5m": (60, 60),
-        "15m": (60, 60),
-        "30m": (60, 60),
-        "60m": (730, 730),
-        "1h": (730, 730)
-    }
-    max_days_back, max_total_days = limits[interval]
-    earliest_allowed = today - timedelta(days=max_days_back)
-    
-    # Ajustar fecha de inicio si es necesario
-    if start_date < earliest_allowed:
-        st.error(f"❌ Para intervalo '{interval}', la fecha de inicio no puede ser anterior a {earliest_allowed}. Por favor, selecciona una fecha dentro de los últimos {max_days_back} días.")
-        st.stop()
-    
-    days_diff = (end_date - start_date).days
-    if days_diff > max_total_days:
-        st.error(f"❌ El rango de fechas seleccionado ({days_diff} días) supera el límite de {max_total_days} días para el intervalo '{interval}'. Reduce el rango.")
-        st.stop()
-    
-    st.info(f"✅ Intervalo intradiario válido: {interval}. Los datos se descargarán correctamente.")
-
+# --- Función de descarga robusta ---
 @st.cache_data(ttl=3600, show_spinner=False)
-def descargar_ticker(ticker, start, end, interval, prepost):
+def descargar_ticker(ticker, start, end, interval):
     try:
-        data = yf.download(
-            ticker, 
-            start=start, 
-            end=end, 
-            interval=interval, 
-            progress=False, 
-            auto_adjust=False, 
-            threads=True,
-            prepost=prepost
-        )
+        data = yf.download(ticker, start=start, end=end, interval=interval, progress=False, auto_adjust=False, threads=True)
         if data.empty:
             return None
-        
-        # --- CORRECCIÓN PRINCIPAL: aplanar columnas si hay MultiIndex ---
-        if isinstance(data.columns, pd.MultiIndex):
-            # Para un solo ticker, las columnas son (ticker, variable) -> nos quedamos con variable
-            data.columns = data.columns.droplevel(0)
-        
-        # Resetear índice para que la fecha sea columna
         data = data.reset_index()
-        
-        # Asegurar que la columna de fecha se llame 'Date'
         if 'Date' not in data.columns:
-            # Puede llamarse 'Datetime' o ser la primera columna sin nombre
-            if 'Datetime' in data.columns:
-                data.rename(columns={'Datetime': 'Date'}, inplace=True)
-            else:
-                data.rename(columns={data.columns[0]: 'Date'}, inplace=True)
-        
+            data.rename(columns={data.columns[0]: 'Date'}, inplace=True)
         return data
     except Exception as e:
         st.error(f"Error con {ticker}: {str(e)}")
         return None
 
+# --- Botón principal ---
 if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
     if not selected_columns:
         st.error("❌ Selecciona al menos una columna.")
@@ -135,7 +71,7 @@ if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
     resultados = {}
     with st.spinner(f"Descargando {len(tickers)} ticker(s)..."):
         with ThreadPoolExecutor(max_workers=min(5, len(tickers))) as executor:
-            futures = {executor.submit(descargar_ticker, t, start_date, end_date, interval, include_prepost): t for t in tickers}
+            futures = {executor.submit(descargar_ticker, t, start_date, end_date, interval): t for t in tickers}
             for future in as_completed(futures):
                 ticker = futures[future]
                 df = future.result()
@@ -150,22 +86,15 @@ if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
 
     st.success(f"✅ Descargados {len(resultados)} tickers correctamente.")
 
-    # --- Vista previa del primer ticker con filtro de columnas existentes ---
+    # --- Vista previa del primer ticker ---
     primer_ticker = list(resultados.keys())[0]
-    # Filtrar columnas que realmente existen en el DataFrame
-    cols_existentes = [col for col in ['Date'] + selected_columns if col in resultados[primer_ticker].columns]
-    if not cols_existentes:
-        st.warning("No hay columnas válidas para mostrar la vista previa.")
-    else:
-        st.subheader(f"📋 Vista previa - {primer_ticker} (últimos 5 registros)")
-        df_preview = resultados[primer_ticker][cols_existentes]
-        st.dataframe(df_preview.tail(5), use_container_width=True)
+    st.subheader(f"📋 Vista previa - {primer_ticker} (últimos 5 registros)")
+    df_preview = resultados[primer_ticker][['Date'] + selected_columns]
+    st.dataframe(df_preview.tail(5), use_container_width=True)
 
+    # --- Función para generar el contenido de un ticker (bytes) ---
     def generar_archivo_bytes(df, ticker, formato):
-        # Filtrar columnas existentes también para la exportación
         cols = ['Date'] + [col for col in selected_columns if col in df.columns]
-        if not cols:
-            return b""
         df_export = df[cols].copy()
         df_export = df_export.fillna('')
         if formato == "CSV":
@@ -176,12 +105,10 @@ if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
                 df_export.to_excel(writer, index=False, sheet_name=ticker[:31])
             return output.getvalue()
 
+    # --- Botones de descarga individual ---
     st.subheader("⬇️ Descarga individual por ticker")
     for ticker, df in resultados.items():
         archivo_bytes = generar_archivo_bytes(df, ticker, output_format)
-        if not archivo_bytes:
-            st.warning(f"No hay columnas válidas para exportar {ticker}. Se omite.")
-            continue
         ext = "csv" if output_format == "CSV" else "xlsx"
         st.download_button(
             label=f"📥 {ticker} - {output_format}",
@@ -191,16 +118,16 @@ if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
             key=f"download_{ticker}"
         )
 
+    # --- Botón de descarga de todos en ZIP ---
     if len(resultados) > 1:
         st.subheader("📦 Descarga masiva")
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
             for ticker, df in resultados.items():
                 archivo_bytes = generar_archivo_bytes(df, ticker, output_format)
-                if archivo_bytes:
-                    ext = "csv" if output_format == "CSV" else "xlsx"
-                    nombre_archivo = f"{ticker.replace('^', '')}_{start_date}_{end_date}.{ext}"
-                    zip_file.writestr(nombre_archivo, archivo_bytes)
+                ext = "csv" if output_format == "CSV" else "xlsx"
+                nombre_archivo = f"{ticker.replace('^', '')}_{start_date}_{end_date}.{ext}"
+                zip_file.writestr(nombre_archivo, archivo_bytes)
         zip_buffer.seek(0)
         st.download_button(
             label="📦 Descargar TODOS en ZIP",
@@ -209,6 +136,7 @@ if st.sidebar.button("🔍 Obtener y mostrar datos", type="primary"):
             mime="application/zip"
         )
 
+    # --- Gráfico del primer ticker ---
     st.subheader(f"📊 Precio de cierre - {primer_ticker}")
     if 'Adj Close' in resultados[primer_ticker].columns:
         close_col = 'Adj Close'
